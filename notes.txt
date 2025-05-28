@@ -1,0 +1,2 @@
+run.sh contains the shell script to configure the rust binary to give it network admin capabilities, since it has to open a new tun interface
+
