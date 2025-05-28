@@ -19,15 +19,32 @@ fn main() -> io::Result<()> {
         }//only dealing with IPv4 addresses
         
         match etherparse::Ipv4HeaderSlice::from_slice(&buf[4..nbytes]) {
+            //here p is the TCP user datagram 
             Ok(p) => {
                 let pkt_src = p.source_addr();
                 let pkt_dest = p.destination_addr();
-                let pkt_proto = p.protocol();
+                let pkt_proto = p.protocol(); 
                 let pkt_payload_len = p.payload_len();
-                eprint!("payload bytes: {} \nframe headers: {:x?} \nframe protocol: {:x?}\nIP packet(frame paylaod): {:x?}\n", nbytes-4, frame_flags, frame_proto, p);
-                eprintln!("IP packet source: {:?}\nIP packet dest: {:?}\nIP packet protocol: {:?}\nIP payload len: {:?}\n", pkt_src, pkt_dest, pkt_proto, pkt_payload_len);
+                let pkt_header_len = p.slice().len();
+                
+                if pkt_proto != etherparse::IpNumber(0x06) {
+                    continue;  
+                }//only dealing with TCP user datagrams, if anything else comes up, ignore after capture
+                
+                //parsing TCP headers
+                match etherparse::TcpHeaderSlice::from_slice(&buf[4 + pkt_header_len ..nbytes]) {
+                    Ok(p) => {
+                        let tcp_src = p.source_port();
+                        let tcp_dest = p.destination_port();
+                        
+                        eprintln!("src port: {:?}\ndest port: {:?}", tcp_src, tcp_dest);
+                    },
+                    Err(e) => {eprintln!("TCP header slice error: {:?}", e)} 
+                }
+                eprintln!("IP packet source: {:?}\nIP packet dest: {:?}\nIP packet protocol: {:?}\nIP payload len: {:?}", pkt_src, pkt_dest, pkt_proto, pkt_payload_len);
+                eprintln!("payload bytes: {} \nframe headers: {:x?} \nframe protocol: {:x?}\nIP packet(frame paylaod): {:x?}\n", nbytes-4, frame_flags, frame_proto, p);
             }
-            Err(e) => eprintln!("header slice error: {:?}", e)
+            Err(e) => eprintln!("IP header slice error: {:?}", e)
         }
         //here p is the IP packet
     } 
