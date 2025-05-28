@@ -1,6 +1,20 @@
 use std::io;
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
+
+mod tcp;
+
+#[derive(Copy, Debug, PartialEq, Eq, Hash, Clone)]
+struct Quad {
+    src: (Ipv4Addr, u16),        //src IP and port
+    dest: (Ipv4Addr, u16)
+}
+
 
 fn main() -> io::Result<()> {
+    
+    let mut connection: HashMap<Quad, tcp::TCPState> = HashMap::new();
+    
     let nic = tun_tap::Iface::new("tun0", tun_tap::Mode::Tun)?;   //the virtual network card, attached to this process
 
     let mut buf = [0u8; 1504];    //buffer to recieve data coming into this virtual network card 
@@ -20,34 +34,42 @@ fn main() -> io::Result<()> {
         
         match etherparse::Ipv4HeaderSlice::from_slice(&buf[4..nbytes]) {
             //here p is the TCP user datagram 
-            Ok(p) => {
-                let pkt_src = p.source_addr();
-                let pkt_dest = p.destination_addr();
-                let pkt_proto = p.protocol(); 
-                let pkt_payload_len = p.payload_len();
-                let pkt_header_len = p.slice().len();
+            Ok(ip) => {
+                let pkt_src = ip.source_addr();
+                let pkt_dest = ip.destination_addr();
+                let pkt_proto = ip.protocol(); 
+                let pkt_payload_len = ip.payload_len();
+                let pkt_header_len = ip.slice().len();
                 
                 if pkt_proto != etherparse::IpNumber(0x06) {
                     continue;  
                 }//only dealing with TCP user datagrams, if anything else comes up, ignore after capture
                 
                 //parsing TCP headers
-                match etherparse::TcpHeaderSlice::from_slice(&buf[4 + pkt_header_len ..nbytes]) {
-                    Ok(p) => {
-                        let tcp_src = p.source_port();
-                        let tcp_dest = p.destination_port();
+                match etherparse::TcpHeaderSlice::from_slice(&buf[(4 + pkt_header_len)..nbytes]) {
+                    Ok(ud) => {   //ud is the user datagram  
+                        let tcp_header_len = ud.slice().len();
+                        let tcp_data_offset = 4 + pkt_header_len + tcp_header_len;    //frame header offset + ip packet header offset + tcp header offset 
                         
-                        eprintln!("src port: {:?}\ndest port: {:?}", tcp_src, tcp_dest);
+                        let tcp_src = ud.source_port();
+                        let tcp_dest = ud.destination_port();
+                        
+                        connection.entry(Quad {
+                            src: (pkt_src, tcp_src),
+                            dest: (pkt_dest, tcp_dest)
+                        }).or_insert(tcp::TCPState{}).on_packet(ip, ud, &buf[tcp_data_offset..nbytes]);
+                        
+                        //eprintln!("src port: {:?}\ndest port: {:?}", tcp_src, tcp_dest);
                     },
                     Err(e) => {eprintln!("TCP header slice error: {:?}", e)} 
-                }
+                }  
                 eprintln!("IP packet source: {:?}\nIP packet dest: {:?}\nIP packet protocol: {:?}\nIP payload len: {:?}", pkt_src, pkt_dest, pkt_proto, pkt_payload_len);
-                eprintln!("payload bytes: {} \nframe headers: {:x?} \nframe protocol: {:x?}\nIP packet(frame paylaod): {:x?}\n", nbytes-4, frame_flags, frame_proto, p);
+                eprintln!("payload bytes: {} \nframe headers: {:x?} \nframe protocol: {:x?}\nIP packet(frame paylaod): {:x?}\n", nbytes-4, frame_flags, frame_proto, ip);
             }
             Err(e) => eprintln!("IP header slice error: {:?}", e)
         }
-        //here p is the IP packet
+        //here ip is the IP packet
     } 
     
-    Ok(())
+    //Ok(())
 }
