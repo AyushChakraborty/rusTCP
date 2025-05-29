@@ -13,7 +13,7 @@ struct Quad {
 
 fn main() -> io::Result<()> {
     
-    let mut connection: HashMap<Quad, tcp::TCPState> = HashMap::new();
+    let mut connection: HashMap<Quad, tcp::Connection> = HashMap::new();
     
     let mut nic = tun_tap::Iface::new("tun0", tun_tap::Mode::Tun)?;   //the virtual network card, attached to this process
 
@@ -57,7 +57,7 @@ fn main() -> io::Result<()> {
                         connection.entry(Quad {
                             src: (pkt_src, tcp_src),
                             dest: (pkt_dest, tcp_dest)
-                        }).or_insert(tcp::TCPState::default()).on_packet(&mut nic, ip, ud, &buf[tcp_data_offset..nbytes])?;
+                        }).or_insert(tcp::Connection::default()).on_packet(&mut nic, ip, ud, &buf[tcp_data_offset..nbytes])?;
                         
                         //eprintln!("src port: {:?}\ndest port: {:?}", tcp_src, tcp_dest);
                     },
