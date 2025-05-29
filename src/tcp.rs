@@ -45,6 +45,7 @@ impl TCPState {
                     let mut send_buf_ref = &mut send_buf[..];  //needed due to the signature of .write()
                     syn_ack_headers.write(&mut send_buf_ref)?;
                     ip_syn_ack_headers.write(&mut send_buf_ref)?;
+                    //no payload in case of syn_ack packets, so none written
                     send_buf_ref.len()
                 };
                 

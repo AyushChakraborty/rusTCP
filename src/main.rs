@@ -11,7 +11,7 @@ struct Quad {
 }
 
 
-fn main() -> io::Result<usize> {
+fn main() -> io::Result<()> {
     
     let mut connection: HashMap<Quad, tcp::TCPState> = HashMap::new();
     
