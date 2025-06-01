@@ -150,28 +150,7 @@ impl Connection {
         
         //done with the transport layer details for this case, so passing it to the network layer, by encapsulating
         //it in a IP packet
-        
-        // let ip_syn_ack_headers = etherparse::Ipv4Header::new(syn_ack_headers.header_len_u16(), 64, etherparse::IpNumber::TCP, 
-        //     [iph.destination()[0], iph.destination()[1], iph.destination()[2], iph.destination()[3]], 
-        //     [iph.source()[0], iph.source()[1], iph.source()[2], iph.source()[3]]).unwrap(); 
-        //c.ip.set_payload_len(c.tcp.header_len() as usize + 0).unwrap();     //0 due to no payload
-        
-        // eprintln!("got ip header:\n{:02x?}", iph);
-        // eprintln!("got tcp header:\n{:02x?}", udh);
-        
-        //c.ip.checksum = c.ip.calc_checksum_ipv4(&c.ip, &[]).expect("failed to compute checksum");
-        
-        // let unwritten = {
-        //     let mut send_buf_ref = &mut buf[..];  //needed due to the signature of .write()
-        //     c.ip.write(&mut send_buf_ref)?;   //it comes first since ip headers are wrapped around the
-        //     //the segment from the transport layer 
-        //     c.tcp.write(&mut send_buf_ref)?;
-        //     //no payload in case of syn_ack packets, so none written
-        //     send_buf_ref.len()       //.len() returns the avaiable bytes in the buffer
-        // };
-        
-        // // eprintln!("responding with: {:02x?}", &buf[..buf.len() - unwritten]);
-        // nic.send(&buf[..buf.len() - unwritten])?;
+    
         c.send(nic, &[])?;
         Ok(Some(c))
     } 
@@ -263,7 +242,7 @@ impl Connection {
             //so right at this stage, the ACK itself has been rightfully acknowledged, hence we increment UNA
             self.snd.una = segack;
             
-            //valid SEG check
+            //valid SEG check 
             //                               RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND         (first data byte sent)
             // and                       RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND   (last data byte sent)
             let segseq = udh.sequence_number(); 
