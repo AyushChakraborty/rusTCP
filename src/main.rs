@@ -25,6 +25,7 @@ fn main() -> io::Result<()> {
         let nbytes = nic.recv(&mut buf[..])?;   //what is recived is the frame, and the payload of the frame is the 
         //IP packet which we intend to get
         
+        // ( only needed if the frame bytes are to be handled, here we dont
         //these make sense wrt MTU, where apart from the first 4 bytes, the rest are the actual IP payload
         // let frame_flags = u16::from_be_bytes([buf[0], buf[1]]);
         // let frame_proto = u16::from_be_bytes([buf[2], buf[3]]);
@@ -32,6 +33,7 @@ fn main() -> io::Result<()> {
         // if frame_proto != 0x0800 {
         //     continue;
         // }//only dealing with IPv4 addresses
+        // )
         
         match etherparse::Ipv4HeaderSlice::from_slice(&buf[..nbytes]) {
             Ok(iph) => {   //ip header

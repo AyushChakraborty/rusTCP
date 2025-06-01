@@ -1,9 +1,10 @@
 use std::io;
+use std::cmp::Ordering;
 
 
 pub enum TCPState {  
-    Closed,
-    Listen,
+    //Closed,
+    //Listen,
     SynRcvd,
     Estab
 }//following the TCP state diagram, refer RFC 793 page 22
@@ -149,7 +150,7 @@ impl Connection {
         let unwritten = {
             let mut send_buf_ref = &mut buf[..];  //needed due to the signature of .write()
             ip_syn_ack_headers.write(&mut send_buf_ref)?;   //it comes first since ip headers are wrapped around the
-            //the segment from thr transport layer 
+            //the segment from the transport layer 
             syn_ack_headers.write(&mut send_buf_ref)?;
             //no payload in case of syn_ack packets, so none written
             send_buf_ref.len()
@@ -166,6 +167,87 @@ impl Connection {
         iph: etherparse::Ipv4HeaderSlice<'a>, 
         udh: etherparse::TcpHeaderSlice<'a>, 
         data: &'a [u8]) -> io::Result<()> {
+            
+            //following checks based on RFC 793 pg 24
+        
+            //accptable ACK check, where U < A <= N and since the function is for exclusive checks, 
+            //.wrapping_add(1) is done so that N now becomes N + 1 and the check is also valid for N 
+            //                              SND.UNA < SEG.ACK =< SND.NXT    
+            let segack = udh.acknowledgment_number();
+            
+            if !is_between_wrapped(&self.snd.una, &segack, &self.snd.nxt.wrapping_add(1)) { 
+                return Ok(());
+            }
+            
+            //valid SEG check
+            //                               RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND         (first data byte sent)
+            // and                       RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND   (last data byte sent)
+            let segseq = udh.sequence_number(); 
+            let mut seglen = data.len();
+            
+            //as per RFC 793, SEG.LEN must include the syn, fin bits if the segment is of one of those types
+            if udh.syn() || udh.fin() {
+                seglen += 1;
+            }
+            
+            if seglen == 0 && !udh.syn() && !udh.fin() {
+                //has its own case, where the segment length is 0 (keep in mind that segment length is the payload
+                //length that the segment carries) and its only an ACK segment
+                if self.recv.wnd == 0 {
+                    if segseq != self.recv.nxt {
+                        return Ok(());
+                    }
+                }else if self.recv.wnd > 0 {
+                    if !is_between_wrapped(&self.recv.nxt.wrapping_sub(1), &segseq, &(self.recv.nxt + self.recv.wnd as u32)) {
+                        return Ok(());
+                    }
+                }else {
+                    return Ok(());
+                }
+            }else if seglen > 0 && !udh.syn() && !udh.fin(){
+                if self.recv.wnd == 0 {
+                    return Ok(());
+                }else if self.recv.wnd > 0 {
+                    if !is_between_wrapped(&self.recv.nxt.wrapping_sub(1), &segseq, &self.snd.nxt.wrapping_add(self.recv.wnd as u32)) &&
+                    !is_between_wrapped(&self.recv.nxt.wrapping_sub(1), &(segseq + seglen as u32 - 1), &self.snd.nxt.wrapping_add(self.recv.wnd as u32)) { 
+                        return Ok(());
+                    }
+                }else {
+                    return Ok(()); 
+                }
+            }else {
+                return Ok(());
+            }
+            //now that the checks are done,
+            
+            
+            match self.state {
+                TCPState::SynRcvd => {
+                    //will to get ACK for our SYN now, ensured after the checks
+                    
+                }
+                TCPState::Estab => {
+                }
+            }
             Ok(())
         }
+}
+
+fn is_between_wrapped(start: &u32, x: &u32, end: &u32) -> bool{
+    //this check if exclusive of the endpoints start and end itself, x must be strictly between
+    //start and end for the function to return true
+    match start.cmp(x) {
+        Ordering::Equal => {return false;},
+        Ordering::Less => {
+            if end >= start && end <= x {
+                return false;
+            }else {return true;}
+        },
+        Ordering::Greater => {
+            if x < end && end < start {return true;}
+            else {
+                return false;
+            }
+        }
+    }
 }
