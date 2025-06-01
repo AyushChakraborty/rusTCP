@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Write};
 use std::cmp::Ordering;
 
 
@@ -8,6 +8,15 @@ pub enum TCPState {
     SynRcvd,
     Estab
 }//following the TCP state diagram, refer RFC 793 page 22
+
+impl TCPState {
+    fn is_synchronised(&self) -> bool {
+        match *self {
+            Self::SynRcvd => false,
+            Self::Estab => true
+        }
+    }
+}
 
 
 //several sequence variables to maintain the flow of user datagrams, both in sender and receiver space
@@ -75,14 +84,10 @@ struct RecvSeqSpace {
 pub struct Connection {
     state: TCPState,
     snd: SenSeqSpace,
-    recv: RecvSeqSpace
+    recv: RecvSeqSpace,
+    ip: etherparse::Ipv4Header,
+    tcp: etherparse::TcpHeader
 }
-
-// impl Default for Connection {
-//     fn default() -> Self {
-//         Connection {state: TCPState::Listen}
-//     }
-// }
 
 
 impl Connection {
@@ -107,15 +112,16 @@ impl Connection {
         //by turning both of these bits on for this segment
         
         let iss = 0;    //HAVE TO MAKE THIS RANDOMISED
+        let wnd = 10;
         
         let mut c = Connection {
             state: TCPState::SynRcvd,
-            snd: SenSeqSpace {
+            snd: SenSeqSpace { 
                 //decide on things this host(receiver) wants to send to the sender
                 iss : iss,           
                 una : iss,
-                nxt : iss + 1,
-                wnd : 10,        //decided 
+                nxt : iss,
+                wnd : wnd,        //decided 
                 wl1 : 0,
                 wl2 : 0,
                 up : false
@@ -126,40 +132,55 @@ impl Connection {
                 wnd : udh.window_size(),
                 irs : udh.sequence_number(),
                 up : false
-            }
+            },
+            
+            ip: etherparse::Ipv4Header::new(0, 64, etherparse::IpNumber::TCP, iph.destination(), iph.source()).unwrap(),
+            
+            tcp: etherparse::TcpHeader::new(udh.destination_port(), udh.source_port(), iss, wnd)
         };
     
-        let mut syn_ack_headers = etherparse::TcpHeader::new(udh.destination_port(), udh.source_port(), c.snd.iss, c.snd.wnd);
-        //syn_ack goes from server to cli ent, assuming client first sends the syn packet, which is captured first here
-        syn_ack_headers.syn = true;
-        syn_ack_headers.ack = true;
-        syn_ack_headers.acknowledgment_number = c.recv.nxt;
+        //let mut syn_ack_headers = etherparse::TcpHeader::new(udh.destination_port(), udh.source_port(), c.snd.iss, c.snd.wnd);
+        //syn_ack goes from server to client, assuming client first sends the syn packet, which is captured first here
+        c.tcp.syn = true;
+        c.tcp.ack = true;
+        //c.tcp.acknowledgment_number = c.recv.nxt;
         
         //done with the transport layer details for this case, so passing it to the network layer, by encapsulating
         //it in a IP packet
         
-        let ip_syn_ack_headers = etherparse::Ipv4Header::new(syn_ack_headers.header_len_u16(), 64, etherparse::IpNumber::TCP, 
-            [iph.destination()[0], iph.destination()[1], iph.destination()[2], iph.destination()[3]], 
-            [iph.source()[0], iph.source()[1], iph.source()[2], iph.source()[3]]).unwrap(); 
+        // let ip_syn_ack_headers = etherparse::Ipv4Header::new(syn_ack_headers.header_len_u16(), 64, etherparse::IpNumber::TCP, 
+        //     [iph.destination()[0], iph.destination()[1], iph.destination()[2], iph.destination()[3]], 
+        //     [iph.source()[0], iph.source()[1], iph.source()[2], iph.source()[3]]).unwrap(); 
+        c.ip.set_payload_len(c.tcp.header_len() as usize + 0).unwrap();     //0 due to no payload
         
-        eprintln!("got ip header:\n{:02x?}", iph);
-        eprintln!("got tcp header:\n{:02x?}", udh);
+        // eprintln!("got ip header:\n{:02x?}", iph);
+        // eprintln!("got tcp header:\n{:02x?}", udh);
         
-        syn_ack_headers.checksum = syn_ack_headers.calc_checksum_ipv4(&ip_syn_ack_headers, &[]).expect("failed to compute checksum");
+        //c.ip.checksum = c.ip.calc_checksum_ipv4(&c.ip, &[]).expect("failed to compute checksum");
         
-        let unwritten = {
-            let mut send_buf_ref = &mut buf[..];  //needed due to the signature of .write()
-            ip_syn_ack_headers.write(&mut send_buf_ref)?;   //it comes first since ip headers are wrapped around the
-            //the segment from the transport layer 
-            syn_ack_headers.write(&mut send_buf_ref)?;
-            //no payload in case of syn_ack packets, so none written
-            send_buf_ref.len()
-        };
+        // let unwritten = {
+        //     let mut send_buf_ref = &mut buf[..];  //needed due to the signature of .write()
+        //     c.ip.write(&mut send_buf_ref)?;   //it comes first since ip headers are wrapped around the
+        //     //the segment from the transport layer 
+        //     c.tcp.write(&mut send_buf_ref)?;
+        //     //no payload in case of syn_ack packets, so none written
+        //     send_buf_ref.len()       //.len() returns the avaiable bytes in the buffer
+        // };
         
-        eprintln!("responding with: {:02x?}", &buf[..buf.len() - unwritten]);
-        nic.send(&buf[..unwritten])?;
+        // // eprintln!("responding with: {:02x?}", &buf[..buf.len() - unwritten]);
+        // nic.send(&buf[..buf.len() - unwritten])?;
+        c.send(nic, &[])?;
         Ok(Some(c))
     } 
+    
+    
+    //to send a RESET segment
+    pub fn send_rst(&mut self, nic: &mut tun_tap::Iface) -> Result<()>{
+        self.tcp.rst = true;
+        self.tcp.acknowledgment_number = 0;
+        self.tcp.sequence_number = 0;
+        self.ip.set_payload_len(self.tcp.header_len()); 
+    }
     
     //when a connection already exists, and need to continue on for that connection
     pub fn continue_existing<'a>(&mut self,
@@ -176,6 +197,10 @@ impl Connection {
             let segack = udh.acknowledgment_number();
             
             if !is_between_wrapped(&self.snd.una, &segack, &self.snd.nxt.wrapping_add(1)) { 
+                //if the ACK is not as intended, and its in a non-synchronised state, then send RST segment
+                if !self.state.is_synchronised() {
+                    //send RST then
+                }
                 return Ok(());
             }
             
@@ -186,7 +211,10 @@ impl Connection {
             let mut seglen = data.len();
             
             //as per RFC 793, SEG.LEN must include the syn, fin bits if the segment is of one of those types
-            if udh.syn() || udh.fin() {
+            if udh.syn() {
+                seglen += 1;
+            }
+            if udh.fin() {
                 seglen += 1;
             }
             
@@ -225,11 +253,46 @@ impl Connection {
                 TCPState::SynRcvd => {
                     //will to get ACK for our SYN now, ensured after the checks
                     
+                    
                 }
                 TCPState::Estab => {
                 }
             }
             Ok(())
+        }
+        
+        
+        fn send(&mut self, nic: &mut tun_tap::Iface, payload: &[u8]) -> Result<usize> {
+            let mut buf = [0u8; 1500];
+            
+            self.tcp.sequence_number = self.snd.nxt;
+            self.tcp.acknowledgment_number = self.recv.nxt;
+            self.ip.set_payload_len(self.tcp.header_len() + payload.len());
+            
+            //self.ip.checksum = self.ip.calc_checksum_ipv4(&self.ip, &[]).expect("failed to compute checksum");
+            
+            let mut send_buf_ref = &mut buf[..];  
+            self.ip.write(&mut send_buf_ref);  
+            self.tcp.write(&mut send_buf_ref);
+            //payload present now 
+            let payload_bytes = send_buf_ref.write(payload).unwrap();       //returns the amt of bytes written to the buffer,
+            //might not be the full payload due to buffer size
+            let unwritten = send_buf_ref.len();
+            
+            self.snd.nxt.wrapping_add(payload_bytes as u32);
+            
+            //since syn, fin bits are a part of the payload too
+            if self.tcp.syn {
+                self.snd.nxt.wrapping_add(1);
+                self.tcp.syn = false;
+            } 
+            if self.tcp.fin {
+                self.snd.nxt.wrapping_add(1);
+                self.tcp.fin = false;
+            }
+            
+            nic.send(&buf[..buf.len() - unwritten]);
+            Ok(payload_bytes)
         }
 }
 
