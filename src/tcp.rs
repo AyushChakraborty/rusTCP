@@ -9,14 +9,14 @@ pub enum TCPState {
     Estab,
     FinWait1,
     FinWait2,
-    Closing
+    TimeWait
 }//following the TCP state diagram, refer RFC 793 page 22
 
 impl TCPState {
     fn is_synchronised(&self) -> bool {
         match *self {
             Self::SynRcvd => false,
-            Self::Estab | Self::FinWait1 | Self::Closing | Self::FinWait2 => true
+            Self::Estab | Self::FinWait1 | Self::TimeWait | Self::FinWait2 => true
         }
     }
 }
@@ -110,9 +110,11 @@ impl Connection {
         }
         //from the TCP state diagram as given in RFC 793, we must send a ACK for their SYN, as well as send another SYN
         
-        //LISTEN --> SYN_RCVD transition:
-        //state transition from LISTEN TO SYN_RCVD is encoded here, where the SYN segment is already received, and we send SYN, ACK segment
-        //by turning both of these bits on for this segment
+        /*
+        LISTEN --> SYN_RCVD transition:
+        state transition from LISTEN TO SYN_RCVD is encoded here, where the SYN segment is already received, and we send SYN, ACK segment
+        by turning both of these bits on for this segment
+        */
         
         let iss = 0;    //HAVE TO MAKE THIS RANDOMISED
         let wnd = 10;
@@ -195,21 +197,25 @@ impl Connection {
     
     //to send a RESET segment
     pub fn send_rst(&mut self, nic: &mut tun_tap::Iface) -> Result<()> {
-        // TODO: fix seq numbers
-        // If the incoming segment has an ACK field, the reset takes its
-        // sequence number from the ACK field of the segment, otherwise the
-        // reset has sequence number zero and the ACK field is set to the sum
-        // of the sequence number and segment length of the incoming segment.
-        // The connection remains in the same state
+        /*
+        TODO: fix seq numbers
+        If the incoming segment has an ACK field, the reset takes its
+        sequence number from the ACK field of the segment, otherwise the
+        reset has sequence number zero and the ACK field is set to the sum
+        of the sequence number and segment length of the incoming segment.
+        The connection remains in the same state
+        */
         
-        // TODO: also handle synchronised states 
-        // If the connection is in a synchronized state (ESTABLISHED,
-        // FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT),
-        // any unacceptable segment (out of window sequence number or
-        // unacceptible acknowledgment number) must elicit only an empty
-        // acknowledgment segment containing the current send-sequence number
-        // and an acknowledgment indicating the next sequence number expected
-        // to be received, and the connection remains in the same state
+        /*
+        TODO: also handle synchronised states 
+        If the connection is in a synchronized state (ESTABLISHED,
+        FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT),
+        any unacceptable segment (out of window sequence number or
+        unacceptible acknowledgment number) must elicit only an empty
+        acknowledgment segment containing the current send-sequence number
+        and an acknowledgment indicating the next sequence number expected
+        to be received, and the connection remains in the same state
+        */
         
         self.tcp.rst = true;
         self.tcp.acknowledgment_number = 0;
@@ -227,20 +233,6 @@ impl Connection {
         data: &'a [u8]) -> io::Result<()> {
             
             //following checks based on RFC 793 pg 24
-            
-            //accptable ACK check, where U < A <= N and since the function is for exclusive checks, 
-            //.wrapping_add(1) is done so that N now becomes N + 1 and the check is also valid for N 
-            //                              SND.UNA < SEG.ACK =< SND.NXT    
-            let segack = udh.acknowledgment_number();
-            
-            if !is_between_wrapped(&self.snd.una, &segack, &self.snd.nxt.wrapping_add(1)) { 
-                //if the ACK is not as intended, and its in a non-synchronised state, then send RST segment
-                // to be done 
-                return Ok(());
-            }
-            
-            //so right at this stage, the ACK itself has been rightfully acknowledged, hence we increment UNA
-            self.snd.una = segack;
             
             //valid SEG check 
             //                               RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND         (first data byte sent)
@@ -286,58 +278,107 @@ impl Connection {
             }
             
             //incrementing UNA, NXT
-            self.recv.nxt = segseq.wrapping_add(seglen as u32);        //the next thing the initial receiver has to send 
-            //is the byte from its current sending byte(SEG num) plus(wrapped) length of the segment payload length
+            self.recv.nxt = segseq.wrapping_add(seglen as u32);        /*
+            the next thing the initial receiver has to send 
+            is the byte from its current sending byte(SEG num) plus(wrapped) length of the segment payload length
+            
+            TODO: if not acceptanble, send an ack
+            */
+            
+            if !udh.ack() {
+                return Ok(()); 
+            }
+            
+            
+            /*
+            accptable ACK check, where U < A <= N and since the function is for exclusive checks, 
+            .wrapping_add(1) is done so that N now becomes N + 1 and the check is also valid for N 
+                                           SND.UNA < SEG.ACK =< SND.NXT    
+            */
+            let segack = udh.acknowledgment_number();
+            
+            if !is_between_wrapped(&self.snd.una, &segack, &self.snd.nxt.wrapping_add(1)) { 
+                /*
+                if the ACK is not as intended, and its in a non-synchronised state, then send RST segment
+                to be done 
+                */
+                return Ok(());
+            }
+            
+            /*
+            so right at this stage, the ACK itself has been rightfully acknowledged, hence we increment UNA
+            of the sender 
+            */
+            // self.snd.una = segack;
+        
             
             //now that the checks are done,
             
-            
-            match self.state {
-                TCPState::SynRcvd => {
-                    //will to get ACK for our SYN now, ensured after the checks
-                    if !udh.ack() {
-                        return Ok(());
-                    }
-                    
-                    //for now, lets close the connection immediately
-                    //FIN shld only be sent once the transmission queue is fully empty, so that needs to be handled
-                    //but for now, just plain going to close state this end
-                    self.tcp.fin = true;
-                    self.send(nic, &[])?;
-                    self.state = TCPState::FinWait1; 
-                    
+            if let TCPState::SynRcvd = self.state {
+                //////////
+                if is_between_wrapped(&self.snd.una.wrapping_sub(1), &segack, &self.snd.nxt.wrapping_add(1)) { 
+                    self.state = TCPState::Estab;
+                }else {
+                    // TODO: return RSN <SEQ=SEG.ACK><CTL=RST>
                 }
-                TCPState::Estab => {
+                self.snd.una = segack; 
+            }
+            
+            if let TCPState::Estab = self.state {
+                if !is_between_wrapped(&self.snd.una, &segack, &self.snd.nxt.wrapping_add(1)) { 
+                    return Ok(());
+                }
+                self.snd.una = segack;
+                assert!(data.is_empty());
+                
+                /*
+                for now, lets close the connection immediately
+                FIN shld only be sent once the transmission queue is fully empty, so that needs to be handled
+                but for now, just plain going to close state this end
+                */  
+                self.tcp.fin = true;
+                self.send(nic, &[])?;
+                self.state = TCPState::FinWait1;
+            } 
+            
+            if let TCPState::FinWait1 = self.state {                    
+                if self.snd.una == self.snd.iss + 2 {
+                    //+2 since it has to account for the FIN as well as the ACK sent
+                    self.state = TCPState::FinWait2;
+                }
+
+            }
+            
+            if udh.fin() {
+                if let TCPState::FinWait2 = self.state {
+                    //done, connection closed 
+                    self.send(nic, &[]);
+                    self.state = TCPState::TimeWait;
+                } 
+            }
+            
+            if let TCPState::FinWait2 = self.state {
+                if !udh.fin() || !data.is_empty() {
                     unimplemented!();
                 }
-                
-                TCPState::FinWait1 => {
-                    if !udh.fin() || !data.is_empty() {
-                        unimplemented!();
-                    }
-                    //if we receive a FIN segment, we send an ACK, enter CloseWait state for this host
-                    self.tcp.ack = true;       /////// 
-                    self.tcp.fin = false;
-    
-                    self.send(nic, &[])?;
-                    self.state = TCPState::Closing;
-                }
-                
-                TCPState::Closing => {
-                    
-                }
-                
-                TCPState::FinWait2 => {
-                    
-                }
+                self.tcp.fin = false;
+                self.send(nic, &[]);
+                self.state = TCPState::Closing;
+                 
+                // self.tcp.fin = false;
+                // self.send(nic, &[]);
+                // self.state = TCPState::Closing;
             }
+            
             Ok(())
         }
 }
 
 fn is_between_wrapped(start: &u32, x: &u32, end: &u32) -> bool{
-    //this check if exclusive of the endpoints start and end itself, x must be strictly between
-    //start and end for the function to return true
+    /*
+    this check if exclusive of the endpoints start and end itself, x must be strictly between
+    start and end for the function to return true
+    */
     match start.cmp(x) {
         Ordering::Equal => {return false;},
         Ordering::Less => {
