@@ -100,10 +100,7 @@ impl Connection {
         nic: &mut tun_tap::Iface,
         iph: etherparse::Ipv4HeaderSlice<'a>, 
         udh: etherparse::TcpHeaderSlice<'a>, 
-        data: &'a [u8]) -> io::Result<Option<Self>> {
-
-        let mut buf = [0u8; 1500];      //before things get sent to the virtual NIC, its stored in this buffer
-        
+        _data: &'a [u8]) -> io::Result<Option<Self>> {
     
         if !udh.syn() {       //only want a SYN segment in this state
             return Ok(None);     
@@ -144,59 +141,57 @@ impl Connection {
             tcp: etherparse::TcpHeader::new(udh.destination_port(), udh.source_port(), iss, wnd)
         };
     
-        //let mut syn_ack_headers = etherparse::TcpHeader::new(udh.destination_port(), udh.source_port(), c.snd.iss, c.snd.wnd);
         //syn_ack goes from server to client, assuming client first sends the syn packet, which is captured first here
         c.tcp.syn = true;
         c.tcp.ack = true;
         //c.tcp.acknowledgment_number = c.recv.nxt;
-        
-        //done with the transport layer details for this case, so passing it to the network layer, by encapsulating
-        //it in a IP packet
     
         c.send(nic, &[])?;
         Ok(Some(c))
     } 
     
     
-    fn send(&mut self, nic: &mut tun_tap::Iface, payload: &[u8]) -> Result<usize> {
+    fn send(&mut self, nic: &mut tun_tap::Iface, payload: &[u8]) -> io::Result<usize> {
         let mut buf = [0u8; 1500];
         
         //since we cant write more than the size of the buffer
         let size = min(buf.len(), self.tcp.header_len() + self.ip.header_len() + payload.len());
+        //ip headers must be included here, since they too are written to the buffer
         
         self.tcp.sequence_number = self.snd.nxt;
         self.tcp.acknowledgment_number = self.recv.nxt;
-        self.ip.set_payload_len(size);
+        self.ip.set_payload_len(size - self.ip.header_len()).unwrap();    //but upon setting the payload size 
+        //the ip headers must not be included since its the payload of the ip packet itself 
         
-        //self.ip.checksum = self.ip.calc_checksum_ipv4(&self.ip, &[]).expect("failed to compute checksum");
+        self.tcp.checksum = self.tcp.calc_checksum_ipv4(&self.ip, &[]).expect("failed to compute checksum");
         
         let mut send_buf_ref = &mut buf[..];  
-        self.ip.write(&mut send_buf_ref);  
-        self.tcp.write(&mut send_buf_ref);
+        self.ip.write(&mut send_buf_ref)?;  
+        self.tcp.write(&mut send_buf_ref)?;
         //payload present now 
         let payload_bytes = send_buf_ref.write(payload).unwrap();       //returns the amt of bytes written to the buffer,
         //might not be the full payload due to buffer size
         let unwritten = send_buf_ref.len();
         
-        self.snd.nxt.wrapping_add(payload_bytes as u32);
+        self.snd.nxt = self.snd.nxt.wrapping_add(payload_bytes as u32);
         
         //since syn, fin bits are a part of the payload too
         if self.tcp.syn {
-            self.snd.nxt.wrapping_add(1);
+            self.snd.nxt = self.snd.nxt.wrapping_add(1);
             self.tcp.syn = false;
         } 
         if self.tcp.fin {
-            self.snd.nxt.wrapping_add(1);
+            self.snd.nxt = self.snd.nxt.wrapping_add(1);
             self.tcp.fin = false;
         }
         
-        nic.send(&buf[..buf.len() - unwritten]);
+        nic.send(&buf[..buf.len() - unwritten])?;
         Ok(payload_bytes)
     }
     
     
     //to send a RESET segment
-    pub fn send_rst(&mut self, nic: &mut tun_tap::Iface) -> Result<()> {
+    pub fn send_rst(&mut self, nic: &mut tun_tap::Iface) -> io::Result<()> {
         /*
         TODO: fix seq numbers
         If the incoming segment has an ACK field, the reset takes its
@@ -220,7 +215,7 @@ impl Connection {
         self.tcp.rst = true;
         self.tcp.acknowledgment_number = 0;
         self.tcp.sequence_number = 0;
-        self.ip.set_payload_len(self.tcp.header_len()); 
+        self.ip.set_payload_len(self.tcp.header_len()).unwrap(); 
         self.send(nic, &[])?;
         Ok(())
     }
@@ -248,32 +243,45 @@ impl Connection {
                 seglen += 1;
             }
             
+            let mut ok = false;
+            
             if seglen == 0 && !udh.syn() && !udh.fin() {
                 //has its own case, where the segment length is 0 (keep in mind that segment length is the payload
                 //length that the segment carries) and its only an ACK segment
                 if self.recv.wnd == 0 {
                     if segseq != self.recv.nxt {
-                        return Ok(());
+                        ok = false;
+                    }else {
+                        ok = true;
                     }
                 }else if self.recv.wnd > 0 {
                     if !is_between_wrapped(&self.recv.nxt.wrapping_sub(1), &segseq, &(self.recv.nxt + self.recv.wnd as u32)) {
-                        return Ok(());
+                        ok = false;
+                    }else {
+                        ok = true;
                     }
                 }else {
-                    return Ok(());
+                    false;
                 }
             }else if seglen > 0 && !udh.syn() && !udh.fin(){
                 if self.recv.wnd == 0 {
-                    return Ok(());
+                    ok = false;
                 }else if self.recv.wnd > 0 {
                     if !is_between_wrapped(&self.recv.nxt.wrapping_sub(1), &segseq, &self.snd.nxt.wrapping_add(self.recv.wnd as u32)) &&
                     !is_between_wrapped(&self.recv.nxt.wrapping_sub(1), &(segseq.wrapping_add(seglen as u32 - 1)), &self.snd.nxt.wrapping_add(self.recv.wnd as u32)) { 
-                        return Ok(());
+                        ok = false;
+                    }else {
+                        ok = true;
                     }
                 }else {
-                    return Ok(()); 
+                    ok = false;
                 }
             }else {
+                ok = false;
+            }
+            
+            if !ok {
+                self.send(nic, &[])?;
                 return Ok(());
             }
             
@@ -288,7 +296,6 @@ impl Connection {
             if !udh.ack() {
                 return Ok(()); 
             }
-            
             
             /*
             accptable ACK check, where U < A <= N and since the function is for exclusive checks, 
@@ -309,9 +316,7 @@ impl Connection {
             so right at this stage, the ACK itself has been rightfully acknowledged, hence we increment UNA
             of the sender 
             */
-            // self.snd.una = segack;
         
-            
             //now that the checks are done,
             
             if let TCPState::SynRcvd = self.state {
@@ -324,21 +329,22 @@ impl Connection {
                 self.snd.una = segack; 
             }
             
-            if let TCPState::Estab = self.state {
+            if let TCPState::Estab | TCPState::FinWait1 | TCPState::FinWait2 = self.state {
                 if !is_between_wrapped(&self.snd.una, &segack, &self.snd.nxt.wrapping_add(1)) { 
                     return Ok(());
                 }
                 self.snd.una = segack;
                 assert!(data.is_empty());
-                
                 /*
                 for now, lets close the connection immediately
                 FIN shld only be sent once the transmission queue is fully empty, so that needs to be handled
                 but for now, just plain going to close state this end
                 */  
-                self.tcp.fin = true;
-                self.send(nic, &[])?;
-                self.state = TCPState::FinWait1;
+                if let TCPState::Estab = self.state {
+                    self.tcp.fin = true;
+                    self.send(nic, &[])?;
+                    self.state = TCPState::FinWait1;
+                }
             } 
             
             if let TCPState::FinWait1 = self.state {                    
@@ -346,30 +352,15 @@ impl Connection {
                     //+2 since it has to account for the FIN as well as the ACK sent
                     self.state = TCPState::FinWait2;
                 }
-
             }
             
             if udh.fin() {
                 if let TCPState::FinWait2 = self.state {
                     //done, connection closed 
-                    self.send(nic, &[]);
+                    self.send(nic, &[])?;
                     self.state = TCPState::TimeWait;
                 } 
             }
-            
-            if let TCPState::FinWait2 = self.state {
-                if !udh.fin() || !data.is_empty() {
-                    unimplemented!();
-                }
-                self.tcp.fin = false;
-                self.send(nic, &[]);
-                self.state = TCPState::Closing;
-                 
-                // self.tcp.fin = false;
-                // self.send(nic, &[]);
-                // self.state = TCPState::Closing;
-            }
-            
             Ok(())
         }
 }
